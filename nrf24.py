@@ -14,19 +14,13 @@
 # Python port of Maniacbug NRF24L01 library
 # Author: Joao Paulo Barraca <jpbarraca@gmail.com>
 #
-# BeagleBoneBlack and Raspberry Pi use different GPIO access methods.
-# Select the most appropriate for you by uncommenting one of the
-# two imports.
-# For Raspberry Pi
+
 import RPi.GPIO as GPIO
-
-#For BBBB
-#import Adafruit_BBIO.GPIO as GPIO
-
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
 import spidev
 import time
 import sys
-
 
 def _BV(x):
     return 1 << x
@@ -173,8 +167,7 @@ class NRF24:
 
     def __init__(self):
         GPIO.setmode(GPIO.BCM)
-        self.ce_pin = "25"
-        self.irq_pin = "P9_16"
+        self.ce_pin = 17
         self.channel = 76
         self.data_rate = NRF24.BR_1MBPS
         self.wide_band = False # 2Mbs data rate in use?
@@ -193,17 +186,6 @@ class NRF24:
             GPIO.output(self.ce_pin, GPIO.LOW)
         return
 
-    def irqWait(self, timeout = 30000):
-        # CHANGE: detect module name because wait_for_edge is not available in
-        # other libraries
-        if GPIO.__name__ != "Adafruit_BBIO.GPIO":
-            return False
-
-        # TODO: A race condition may occur here.
-        if GPIO.input(self.irq_pin) == 0: # Pin is already down. Packet is waiting?
-            return True
-
-        return GPIO.wait_for_edge(self.irq_pin, GPIO.FALLING, timeout) == 1
 
     def read_register(self, reg, blen=1):
         buf = [NRF24.R_REGISTER | ( NRF24.REGISTER_MASK & reg )]
@@ -298,12 +280,7 @@ class NRF24:
         print status_str
 
     def print_observe_tx(self, value):
-        tx_str = "OBSERVE_TX=0x{0:02x}: POLS_CNT={2:x} ARC_CNT={2:x}\r\n".format(
-            value,
-            (value >> NRF24.PLOS_CNT) & int("1111",2),
-            (value >> NRF24.ARC_CNT)  & int("1111",2)
-            )
-        print tx_str
+        print "Observe Tx: %02x  Lost Pkts: %d Retries: %d" % (value, value >> NRF24.PLOS_CNT, value & 15)
 
     def print_byte_register(self, name, reg, qty=1):
         extra_tab = '\t' if len(name) < 8 else 0
@@ -363,15 +340,13 @@ class NRF24:
         print "CRC Length\t = %s" % NRF24.crclength_e_str_P[self.getCRCLength()]
         print "PA Power\t = %s" % NRF24.pa_dbm_e_str_P[self.getPALevel()]
 
-    def begin(self, major, minor, ce_pin, irq_pin):
+    def begin(self, major, minor, ce_pin):
         # Initialize SPI bus
         self.spidev = spidev.SpiDev()
         self.spidev.open(major, minor)
         self.ce_pin = ce_pin
-        self.irq_pin = irq_pin
 
         GPIO.setup(self.ce_pin, GPIO.OUT)
-        GPIO.setup(self.irq_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         time.sleep(5 / 1000000.0)
 
@@ -461,10 +436,12 @@ class NRF24:
         what = self.whatHappened()
 
         result = what['tx_ok']
-
+        if what['tx_fail']:
+             self.flush_tx();
         # Handle the ack packet
         if what['rx_ready']:
             self.ack_payload_length = self.getDynamicPayloadSize()
+            self.ack_payload_available = True   # needed for ack-payload
 
         return result
 
@@ -483,7 +460,7 @@ class NRF24:
     def getDynamicPayloadSize(self):
         return self.spidev.xfer2([NRF24.R_RX_PL_WID, NRF24.NOP])[1]
 
-    def available(self, pipe_num=None, irq_wait=False, irq_timeout=30000):
+    def available(self, pipe_num=None):
         if not pipe_num:
             pipe_num = []
 
@@ -494,12 +471,6 @@ class NRF24:
         # doesn't set the RX flag...
         if status & _BV(NRF24.RX_DR) or (status & 0b00001110 != 0b00001110):
             result = True
-        else:
-            if irq_wait: # Will use IRQ wait
-                if self.irqWait(irq_timeout): # Do we have a packet?
-                    status = self.get_status() # Seems like we do!
-                    if status & _BV(NRF24.RX_DR) or (status & 0b00001110 != 0b00001110):
-                        result = True 
 
         if result:
             # If the caller wants the pipe number, include that
@@ -770,4 +741,4 @@ class NRF24:
 
     def getMaxTimeout(self):
         retries = self.getRetries()
-        return ((250+(250*((retries& 0xf0)>>4 ))) * (retries & 0x0f)) / 1000000.0
+        return ((250+(250*((retries& 0xf0)>>4 ))) * (retries & 0x0f)) / 1000000.0 * 2
